@@ -43,23 +43,19 @@ void mexFunction(int nlhs, mxArray *plhs[],
     mxGPUArray const *A, *B;
     mxGPUArray *C;
     const double *d_A, *d_B;
+    const double **d_Aarr, **d_Barr;
     double *d_C;
     double const alpha = 1, beta = 0;
-    const size_t *Aoff, *Boff;
 
     /* Initialize the MathWorks GPU API. */
     mxInitGPU();
 
     /* we expect 2 double (later uint16) gpu Arrays and 2 uint64 offset arrays */
 
-    if (nrhs!=4) {
+    if (nrhs!=2) {
         mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongNumberOfInputs", "Expected 2 inputs.");
     } else if( !mxIsGPUArray(prhs[0]) || !mxIsGPUArray(prhs[1]) ) {
         mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongInputType", "Expected arguments 1 and 2 to be gpuArray types.");
-    } else if( !mxIsUint64(prhs[2]) || !mxIsUint64(prhs[3]) ) {
-        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongInputType", "Expected arguments 3 and 4 to be uint64 types.");
-    } else if ( mxGetNumberOfElements(prhs[2]) != mxGetNumberOfElements(prhs[3]) ) {
-       mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongNumberStrides", "Expected arguments 3 and 4 to be the same length.");
     }
 
     // get the actual matrix gpu reference
@@ -99,10 +95,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     }
     d_A = (const double *)(mxGPUGetDataReadOnly(A));
     d_B = (const double *)(mxGPUGetDataReadOnly(B));
-    Aoff = (const size_t *)(mxGetData(prhs[2]));
-    Boff = (const size_t *)(mxGetData(prhs[3]));
-    const size_t L = mxGetNumberOfElements(prhs[2]); // number of strides
-
+    
     /* 
      * Inputs 3 and 4 are the strides for A and B: we trust this blindly for now
      * Input 5 is the number of dimensions.
@@ -125,17 +118,36 @@ void mexFunction(int nlhs, mxArray *plhs[],
                             MX_GPU_DO_NOT_INITIALIZE);
     const size_t Csz = (size_t) mxGPUGetNumberOfElements(C);
     d_C = (double *)(mxGPUGetData(C)); // point to device data
-
+    
     // make sure that the number of output strides matches the size of the data that we computed
-    if(L > (Csz / M / N) ){
-        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongStrideSize", "Expected number of strides to match the data output size.");
-        mxGPUDestroyGPUArray(A); // cleanup
-        mxGPUDestroyGPUArray(B); // cleanup
-        mxGPUDestroyGPUArray(C); // cleanup
-    }
+    const size_t L = Csz / M / N; // number of strides we need to find
 
     /* we need to generate a set of pointers that point to the 
-       location of the data for each stride */
+       location of the data for each stride, 
+       while broadcasting over dimensions */
+    d_Aarr = (const double **) mxMalloc(L * sizeof(d_Aarr));
+    for(int i = 0; i < L; ++i){
+        size_t szA = 1, szC = 1; // size so far
+        d_Aarr[i] = d_A; // initial pointer locations
+        for(int d = 2; d < nDimsA; ++d){ // for each upper dim
+            const size_t ind = (dimsA[d] == 1) ? 0 : ((i / szC) % dimsC[d]); // index for this dim
+            d_Aarr[i] += (ind*M*K*szA); // increment pointer
+            szA *= dimsA[d]; // increment stride size
+            szC *= dimsC[d]; // increment stride size
+        }
+    }
+
+    d_Barr = (const double **) mxMalloc(L * sizeof(d_Barr));
+    for(int i = 0; i < L; ++i){
+        size_t szB = 1, szC = 1; // size so far
+        d_Barr[i] = d_B; // initial pointer locations
+        for(int d = 2; d < nDimsB; ++d){ // for each upper dim
+            const size_t ind = (dimsB[d] == 1) ? 0 : ((i / szC) % dimsC[d]); // index for this dim
+            d_Barr[i] += (ind*K*N*szB); // increment pointer
+            szB *= dimsB[d]; // increment stride size
+            szC *= dimsC[d]; // increment stride size
+        }
+    }
 
     /* code to call CUBLAS */
     cublasStatus_t stat;
@@ -145,7 +157,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     if (stat == CUBLAS_STATUS_SUCCESS) { // we succeeded: call gemm for basic matrix x matrx multiply
         for(int i = 0; i < L; ++i) // for each output index
             stat = cublasDgemm(handle, trans, trans, M,N,K, &alpha,
-                           d_A + Aoff[i], M, d_B + Boff[i], K, &beta, d_C + i*M*N, M); // call directly
+                           d_Aarr[i], M, d_Barr[i], K, &beta, d_C + i*M*N, M); // call directly
     }
 
     /* Wrap the result up as a MATLAB gpuArray for return. */
