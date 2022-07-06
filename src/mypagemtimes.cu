@@ -12,21 +12,6 @@
 #include "mex.h"
 #include "gpu/mxGPUArray.h"
 
-/*
- * Device code
- */
-void __global__ init(double const * const A,
-                         double * const B,
-                         int const N)
-{
-    /* Calculate the global linear index, assuming a 1-d grid. */
-    int const i = blockDim.x * blockIdx.x + threadIdx.x;
-    if (i < N) {
-        B[i] = A[i];
-    }
-}
-
-
 /* CUBLAS code 
 static __inline__ void modify (cublasHandle_t handle, float *m, int ldm, int n, int p, int q, float alpha, float beta){
     cublasSscal (handle, n-q, &alpha, &m[IDX2C(p,q,ldm)], ldm);
@@ -36,24 +21,26 @@ static __inline__ void modify (cublasHandle_t handle, float *m, int ldm, int n, 
 /*
  * Host code
  */
+
 void mexFunction(int nlhs, mxArray *plhs[],
                  int nrhs, mxArray const *prhs[])
 {
-    /* Declare all variables.*/
+    /* Declare most variables.*/
     mxGPUArray const *A, *B;
     mxGPUArray *C;
-    const double *d_A, *d_B;
-    const double **d_Aarr, **d_Barr;
-    double *d_C;
-    double const alpha = 1, beta = 0;
+    const half *d_A, *d_B;
+    const half **d_Aarr, **d_Barr;
+    half *d_C;
+    half const alpha = 1, beta = 0;
+    cudaStream_t *streamArray = 0;
 
     /* Initialize the MathWorks GPU API. */
     mxInitGPU();
 
-    /* we expect 2 double (later uint16) gpu Arrays and 2 uint64 offset arrays */
+    /* we expect 2 uint16 gpu Arrays*/
 
     if (nrhs!=2) {
-        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongNumberOfInputs", "Expected 2 inputs.");
+        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongNumberOfInputs", "Expected 2 inputs. The 'transpose' and 'ctranspose' options are not supported yet.");
     } else if( !mxIsGPUArray(prhs[0]) || !mxIsGPUArray(prhs[1]) ) {
         mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongInputType", "Expected arguments 1 and 2 to be gpuArray types.");
     }
@@ -85,16 +72,20 @@ void mexFunction(int nlhs, mxArray *plhs[],
     const int M = dimsA[0], K = dimsA[1], N = dimsB[1];
 
     /*
-     * Verify that A really is a double array before extracting the pointer.
+     * Verify that A really is a uint16 array before extracting the pointer.
      % I think this is unnecessary?
      */
-    if (mxGPUGetClassID(A) != mxDOUBLE_CLASS || mxGPUGetClassID(B) != mxDOUBLE_CLASS) {
-        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongInputType", "Expected underlying type to be double.");
+    if (mxGPUGetClassID(A) != mxUINT16_CLASS || mxGPUGetClassID(B) != mxUINT16_CLASS) {
+        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongInputType", "Expected underlying type to be uint16.");
         mxGPUDestroyGPUArray(A); // cleanup
         mxGPUDestroyGPUArray(B); // cleanup
+    } else if (mxGPUGetComplexity(A) != mxREAL) {
+        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongComplexity", "Expected input 1 to be real.");
+    } else if (mxGPUGetComplexity(B) != mxREAL) {
+        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:WrongComplexity", "Expected input 2 to be real.");        
     }
-    d_A = (const double *)(mxGPUGetDataReadOnly(A));
-    d_B = (const double *)(mxGPUGetDataReadOnly(B));
+    d_A = (const half *)(mxGPUGetDataReadOnly(A));
+    d_B = (const half *)(mxGPUGetDataReadOnly(B));
     
     /* 
      * Inputs 3 and 4 are the strides for A and B: we trust this blindly for now
@@ -117,7 +108,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
                             mxGPUGetComplexity(A),
                             MX_GPU_DO_NOT_INITIALIZE);
     const size_t Csz = (size_t) mxGPUGetNumberOfElements(C);
-    d_C = (double *)(mxGPUGetData(C)); // point to device data
+    d_C = (half *)(mxGPUGetData(C)); // point to device data
     
     // make sure that the number of output strides matches the size of the data that we computed
     const size_t L = Csz / M / N; // number of strides we need to find
@@ -125,7 +116,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     /* we need to generate a set of pointers that point to the 
        location of the data for each stride, 
        while broadcasting over dimensions */
-    d_Aarr = (const double **) mxMalloc(L * sizeof(d_Aarr));
+    d_Aarr = (const half **) mxMalloc(L * sizeof(d_Aarr));
     for(int i = 0; i < L; ++i){
         size_t szA = 1, szC = 1; // size so far
         d_Aarr[i] = d_A; // initial pointer locations
@@ -137,7 +128,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
         }
     }
 
-    d_Barr = (const double **) mxMalloc(L * sizeof(d_Barr));
+    d_Barr = (const half **) mxMalloc(L * sizeof(d_Barr));
     for(int i = 0; i < L; ++i){
         size_t szB = 1, szC = 1; // size so far
         d_Barr[i] = d_B; // initial pointer locations
@@ -150,14 +141,23 @@ void mexFunction(int nlhs, mxArray *plhs[],
     }
 
     /* code to call CUBLAS */
+    cudaError_t cudaErr;
     cublasStatus_t stat;
     cublasHandle_t handle;
     cublasOperation_t trans = CUBLAS_OP_N; // ONE OF CUBLAS_OP_{N,T,C} for none/trans/ctrans
+    streamArray = (cudaStream_t *) mxMalloc(L * sizeof(cudaStream_t *));
     stat = cublasCreate(&handle);
-    if (stat == CUBLAS_STATUS_SUCCESS) { // we succeeded: call gemm for basic matrix x matrx multiply
-        for(int i = 0; i < L; ++i) // for each output index
-            stat = cublasDgemm(handle, trans, trans, M,N,K, &alpha,
-                           d_Aarr[i], M, d_Barr[i], K, &beta, d_C + i*M*N, M); // call directly
+    
+    for (int i = 0; i < L; ++i){
+        cudaErr = cudaStreamCreate(&streamArray[i]);
+        if(cudaErr != cudaSuccess)
+            break;
+    }
+    for(int i = 0; i < L; ++i) // for each output index
+        if (stat == CUBLAS_STATUS_SUCCESS) { // we succeeded in the last call: 
+            cublasSetStream(handle, streamArray[i]); // move to the next stream
+            stat = cublasHgemm(handle, trans, trans, M,N,K, &alpha, // call gemm for dense matrix x matrix multiply
+                           d_Aarr[i], M, d_Barr[i], K, &beta, d_C + i*M*N, M);
     }
 
     /* Wrap the result up as a MATLAB gpuArray for return. */
