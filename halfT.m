@@ -156,7 +156,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         % cast data to a logical array
     end
 
-    % forward native functions
+    % forwarding functions - these incur overhead, but enable functionality
     methods(Hidden)
         % these function are identical in their GPU analog
         function [x, varargout] = gpuUniFun(x, fun, varargin) % unary gpu function - no casting required
@@ -219,7 +219,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
             z = halfT(z);
         end
     end
-    methods(Static)
+    methods(Static, Hidden)
         function varargout = promoteNFun(num_args, fun, hargout, varargin) % n-ary
             % PROMOTENFUN - Call a function of N half types via promotion
             %
@@ -235,8 +235,6 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
             [varargout{1:nargout}] = (fun(num_args{:}, varargin{:})); % call the function
             varargout(hargout) = cellfun(@(x){halfT(x)}, varargout(hargout)); % cast half type outputs
         end
-
-
     end
 
     % overload native numeric type functions
@@ -432,20 +430,44 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
 
             if x.gtype || y.gtype % send to GPU
                 [x, y] = deal(gpuArray(x), gpuArray(y));
+                [x, y] = deal(x.val, y.val);
+                zc = ~(isreal(x) && isreal(y));
+                zi = alias(halfT(0));
+                zr = halfT(gpu_pagemtimes_helper(real(x), real(y)), 'aliased');
+                if zc
+                    zr = zr - halfT(gpu_pagemtimes_helper(imag(x), imag(y)), 'aliased'); end
+                if ~isreal(y)
+                    zi = halfT(gpu_pagemtimes_helper(real(x), imag(y)), 'aliased'); end
+                if ~isreal(x)
+                    zi = zi + halfT(gpu_pagemtimes_helper(imag(x), real(y)), 'aliased'); end
+                if ~zc, z = zr; else, z = complex(zr, zi); end
             else
-                error('halfT/pagemtimes unsupported on the CPU (performance).');
+                % implement via mtimes
+                D = max(4,max(ndims(x), ndims(y))); % need upper dim size to have at least 2 dimensions ...
+                xsz = size(x,1:D);
+                ysz = size(y,1:D);
+                zsz = [size(x,1), size(y,2), max(xsz(3:D), ysz(3:D))];
+                K = prod(zsz(3:end)); % number of upper dimensions
+
+                % find the indices
+                indz = cell(1,D-2);
+                for k = K:-1:1
+                    [indz{:}] = ind2sub(zsz(3:end), k);
+                    indx = num2cell(arrayfun(@min,[indz{:}], xsz(3:end)));
+                    indy = num2cell(arrayfun(@min,[indz{:}], ysz(3:end)));
+                    ix{k} = sub2ind(xsz(3:end), indx{:});
+                    iy{k} = sub2ind(ysz(3:end), indy{:});
+                end
+
+                % compute
+                z = halfT(zeros(zsz)); % init
+                if isa(gcp('nocreate'), 'parallel.ThreadPool')
+                    clu = gcp(); else, clu = 0; % only use a thread pool
+                end
+                parfor(k = 1:K, clu)
+                    z(:,:,k) = mtimes(x(:,:,ix{k}), y(:,:,iy{k}));
+                end
             end
-            [x, y] = deal(x.val, y.val);
-            zc = ~(isreal(x) && isreal(y));
-            zi = alias(halfT(0));
-            zr = halfT(gpu_pagemtimes_helper(real(x), real(y)), 'aliased');
-            if zc
-                zr = zr - halfT(gpu_pagemtimes_helper(imag(x), imag(y)), 'aliased'); end
-            if ~isreal(y)
-                zi = halfT(gpu_pagemtimes_helper(real(x), imag(y)), 'aliased'); end
-            if ~isreal(x)
-                zi = zi + halfT(gpu_pagemtimes_helper(imag(x), real(y)), 'aliased'); end
-            if ~zc, z = zr; else, z = complex(zr, zi); end
         end
     end
 
