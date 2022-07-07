@@ -3,11 +3,11 @@
 % HALFT(x) constructs a halfT object. The underlying data can be sent to a
 % GPU with gpuArray, where it will be aliased as a uint16 type following
 % the <a href="matlab:web('https://www.mathworks.com/matlabcentral/answers/520544-how-to-convert-half-precision-number-into-hexadecimal-representation#answer_430592')">temporary work-around on the MATLAB forum</a>.
-% 
+%
 % Subsequent math calls will be forwarded to the CPU temporarily. In the
 % future, native GPU calls may be added. Data movement class occur on the
 % GPU.
-% 
+%
 % See also HALF
 
 classdef halfT < matlab.mixin.indexing.RedefinesParen
@@ -21,21 +21,31 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
 
     methods
         % constructor
-        function y = halfT(x)
+        function y = halfT(x, aliasing)
             % HALFT - Construct a halfT from a native type
             %
             % y = HALFT(x) creates a halfT with the value of x. If x is a
             % gpuArray, it will be aliased as a uint16 type.
             %
             % If x is already a halfT, this has no effect.
-            if isa(x, 'halfT'), 
+            arguments
+                x
+                aliasing (1,1) string {mustBeMember(aliasing, ["aliased", "native"])} = "native"
+            end
+            if nargin < 2, aliasing = "native"; end
+            if isa(x, 'halfT'),
                 y = x;
             else
-                y.val = half(gather(x)); % convert natively
-                if isgpu(x), y = gpuArray(y); end % put back on GPU
+                switch aliasing
+                    case "aliased"
+                        y.val = x;
+                        y.isaliased = true;
+                    case "native"
+                        y.val = half(gather(x)); % convert natively
+                        if isgpu(x), y = gpuArray(y); end % put back on GPU
+                end
             end
         end
-
     end
 
     % aliasing
@@ -67,23 +77,23 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                 if y.gtype,
                     y.val = gather(y.val);
                 end
-                y.val = half.typecast(y.val); y.isaliased = false; 
-            end, 
+                y.val = half.typecast(y.val); y.isaliased = false;
+            end,
         end
         function y = gpuArray(y), y = alias(y); y.val = gpuArray(y.val); end
         % GPUARRAY - Send data to the GPU
         %
         % y = GPUARRAY(y) returns a halfT object whos underlying data
         % resides on the GPU. If the data is not already aliased, it will
-        % be aliased prior to sending it to the GPU. 
+        % be aliased prior to sending it to the GPU.
         %
         % See also HALFT/ALIAS HALFT/GATHER
         function y = gather(y), y.val = gather(y.val); y = dealias(y); end
         % GPUARRAY - Return data to the CPU
         %
         % y = GPUARRAY(y) returns a halfT object whos underlying data
-        % resides on the CPU. If the data is not already de-aliased, it 
-        % will be de-aliased after return it to the CPU. 
+        % resides on the CPU. If the data is not already de-aliased, it
+        % will be de-aliased after return it to the CPU.
         %
         % See also HALFT/ALIAS HALFT/GPUARRAY
     end
@@ -91,7 +101,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
     % generic type converter
     methods
         function z = cast(y, varargin)
-            % CAST - cast halfT data to a native type
+            % CAST - cast data to/from a native type
             %
             % z = cast(y, NEWCLASS) returns an array z whos class matches
             % NEWCLASS
@@ -100,13 +110,21 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
             % match the attributes of proto
             %
             % See also CAST
-            
-            if y.isaliased, z = dealias(y); else, z = y; end % dealias before casting
-            z = cast(z.val, varargin{:}); % cast with MATLAB semantics
-            
-            % move back to GPU if only changing the class 
-            % (not copying other properties)
-            if numel(varargin)== 1 && y.gtype, z = gpuArray(z); end 
+
+            if nargin == 2 % first syntax: y is a halfT
+                if y.isaliased, z = dealias(y); else, z = y; end % dealias before casting
+                z = cast(z.val, varargin{:}); % cast with MATLAB semantics
+                if y.gtype, z = gpuArray(z); end % move back to GPU if only changing the class
+            elseif nargin == 3 % second syntax: y and/or x ia a halfT
+                x = varargin{2}; % get the prototype
+                if ~isa(x, 'halfT') && isa(y, 'halfT') % cast from the native half type to x, which is native
+                    z = cast(getfield(dealias(y),'val'), 'like', x);
+                elseif isa(x, 'halfT')% casting from native to a halfT
+                    z = halfT(y); % enforce y a halfT
+                    if isa(x, 'gpuArray'), z = gpuArray(z); end
+                    if x.isaliased, z = alias(z); end
+                end
+            end
         end
     end
 
@@ -141,62 +159,96 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
     % forward native functions
     methods(Hidden)
         % these function are identical in their GPU analog
-        function x = gpuUniFun(x, fun, varargin) % unary gpu function - no casting required
-            x.val = fun(x.val, varargin{:}); % apply function directly to the data
+        function [x, varargout] = gpuUniFun(x, fun, varargin) % unary gpu function - no casting required
+            [x.val, varargout{1:nargout-1}] = fun(x.val, varargin{:}); % apply function directly to the data
         end
-        function x = gpuBiFun(x, y, fun, varargin) % binary gpu function - no casting required
+        function [x, varargout] = gpuBiFun(x, y, fun, varargin) % binary gpu function - no casting required
             if isa(y, 'halfT'), yval = y.val; else, yval = y; end % get underlying data
-            x.val = fun(x.val, yval, varargin{:}); % apply function directly to the data
+            [x.val, varargout{1:nargout-1}] = fun(x.val, yval, varargin{:}); % apply function directly to the data
         end
 
         % these functions run on CPU for now, but can easily be run on GPU
         % with a simple kernel
-        function z = nativeUniFun(x, fun, varargin) % unary half function - casting required
+        function [z, varargout] = nativeUniFun(x, fun, varargin) % unary half function - casting required
             if x.gtype, x_ = gather(x); else, x_ = x; end % dealias
-            z = fun(x_.val, varargin{:}); % apply function
+            [z, varargout{1:nargout-1}] = fun(x_.val, varargin{:}); % apply function
             z = halfT(z); % return to type
             if x.gtype, z = gpuArray(z); end % move back to GPU
         end
 
         % these functions run on CPU for now, and require care to be run on
         % GPU with a relatively simple kernel
-        function z = nativeBiFun(x, y, fun, varargin) % binary half function - casting required
+        function [z, varargout] = nativeBiFun(x, y, fun, varargin) % binary half function - casting required
             ogtype = false; % assume not on a GPU unless otherwise detected
             if isa(x,'halfT'), % x is a halfT
                 ogtype = ogtype | x.gtype; % make gpuArray is x is gpuArray
                 if x.isaliased, xval = getfield(dealias(x),'val'); % dealias
                 else, xval = x.val; % take value directly
                 end
-            else, 
+            else, % x is not a halfT
                 ogtype = ogtype | isa(x,'gpuArray'); % make gpuArray is y is gpuArray
                 xval = gather(x); % x is some native type already
+                if islogical(xval), xval = halfT(xval); end % promote logical types
             end
             if isa(y,'halfT'), % y is a halfT
                 ogtype = ogtype | y.gtype; % make gpuArray is y is gpuArray
                 if y.isaliased, yval = getfield(dealias(y),'val'); % dealias
                 else, yval = y.val; % take value directly
-                end 
-            else, 
+                end
+            else, % y is not a halfT
                 ogtype = ogtype | isa(y,'gpuArray'); % make gpuArray is y is gpuArray
                 yval = gather(y); % y is some native type already
+                if islogical(yval), yval = halfT(yval).val; end % promote logical types
             end
-            z = fun(xval, yval, varargin{:}); % apply function
+            [z, varargout{1:nargout-1}] = fun(xval, yval, varargin{:}); % apply function
             z = halfT(z); % return to halfT type
             if ogtype, z = gpuArray(z); end % move back to GPU
         end
+
+        % these functions can run as long as the data is promoted first
+        function [z, varargout] = promoteUniFun(x, fun, varargin) % unary
+            [z, varargout{1:nargout-1}] = (fun(single(x), varargin{:}));
+            z = halfT(z);
+        end
+
+        % these functions can run as long as the data is promoted first
+        function [z, varargout] = promoteBiFun(x, y, fun, varargin) % binary
+            if isa(x, 'halfT'), x = single(x); end
+            if isa(y, 'halfT'), y = single(y); end
+            [z, varargout{1:nargout-1}] = (fun(x, y, varargin{:}));
+            z = halfT(z);
+        end
+    end
+    methods(Static)
+        function varargout = promoteNFun(num_args, fun, hargout, varargin) % n-ary
+            % PROMOTENFUN - Call a function of N half types via promotion
+            %
+            % PROMOTENFUN(num_args, fun, hargout, varargin) promotes the
+            % numeric args num_args that are halfT types, and then calls
+            % function fun on the numeric arguments and varargin. The
+            % outputs in the indices given by hargout are cast to halfT
+            % types.
+
+            hargout = hargout(1:nargout); % shorten to actual number of outputs requested
+            ind_halfT = cellfun(@(x)isa(x, 'halfT'), num_args); % identify halfT args
+            num_args(ind_halfT) = cellfun(@(x){single(x)}, num_args(ind_halfT)); % promote
+            [varargout{1:nargout}] = (fun(num_args{:}, varargin{:})); % call the function
+            varargout(hargout) = cellfun(@(x){halfT(x)}, varargout(hargout)); % cast half type outputs
+        end
+
+
     end
 
-    % overload native functions
+    % overload native numeric type functions
     % TODO: use a halfT kernel to implement these in CUDA
     methods
-        % arithemetic/trigonometry
+        % arithemetic/trigonometry (unary)
         function x = abs(x), x = nativeUniFun(x, @abs); end
         function x = acos(x), x = nativeUniFun(x, @acos); end
         function x = acosh(x), x = nativeUniFun(x, @acosh); end
         function x = asin(x), x = nativeUniFun(x, @asin); end
         function x = asinh(x), x = nativeUniFun(x, @asinh); end
         function x = atan(x), x = nativeUniFun(x, @atan); end
-        function x = atan2(x,y), x = nativeBiFun(x,y, @atan2); end
         function x = atanh(x), x = nativeUniFun(x, @atanh); end
         function x = conj(x), x = nativeUniFun(x, @conj); end
         function x = cos(x), x = nativeUniFun(x, @cos); end
@@ -207,16 +259,11 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = log(x), x = nativeUniFun(x, @log); end
         function x = log10(x), x = nativeUniFun(x, @log10); end
         function x = log1p(x), x = nativeUniFun(x, @log1p); end
-        function x = log2(x), x = nativeUniFun(x, @log2); end
-        function x = minus(x,y), x = nativeBiFun(x,y,@minus); end
-        function x = plus(x,y), x = nativeBiFun(x,y,@plus); end
-        function x = pow10(x), x = nativeUniFun(x,@pow10); end
-        function x = pow2(x,y),
-            if     nargin == 1, x = nativeUniFun(x,  @pow2);
-            elseif nargin == 2, x = nativeBiFun (x,y,@pow2);
-            end
+        function [varargout] = log2(x), 
+            [varargout{1:nargout}] = nativeUniFun(x, @log2);
+            varargout = cellfun(@halfT, varargout, 'UniformOutput',false);
         end
-        function x = power(x,y), x = nativeBiFun(x,y,@power); end
+        function x = pow10(x), x = nativeUniFun(x,@pow10); end
         function x = rsqrt(x), x = nativeUniFun(x, @rsqrt); end
         function x = sign(x), x = nativeUniFun(x, @sign); end
         function x = sin(x), x = nativeUniFun(x, @sin); end
@@ -225,9 +272,22 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = sqrt(x), x = nativeUniFun(x, @sqrt); end
         function x = tan(x), x = nativeUniFun(x, @tan); end
         function x = tanh(x), x = nativeUniFun(x, @tanh); end
-        function x = times(x,y), x = nativeBiFun(x,y,@times); end
         function x = uminus(x), x = nativeUniFun(x, @uminus); end
         function x = uplus(x), x = nativeUniFun(x, @uplus); end
+        
+        % arithemetic/trigonometry (binary)
+        % in these functions, we are not guaranteed x and y are both halfT
+        function x = atan2(x,y), x = nativeBiFun(x,y,@atan2); end
+        function x = minus(x,y), x = nativeBiFun(x,y,@minus); end
+        function x = plus(x,y),  x = nativeBiFun(x,y,@plus); end
+        function x = pow2(x,y),
+            if     nargin == 1, x = nativeUniFun(x,  @pow2);
+            elseif nargin == 2, x = nativeBiFun (x,y,@pow2);
+            end
+        end
+        function x = power(x,y), x = nativeBiFun(x,y,@power); end
+        function x = times(x,y), x = nativeBiFun(x,y,@times); end
+        function x = hypot(x,y), x = nativeBiFun(x,y,@hypot); end
         
         % complex support
         function x = complex(x,y),
@@ -239,24 +299,24 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = real(x), x = gpuUniFun(x, @real); end
 
         % rounding
-        function x = ceil(x), x = nativeUniFun(x, @ceil); end
-        function x = fix(x), x = nativeUniFun(x, @fix); end
+        function x = ceil(x),  x = nativeUniFun(x, @ceil); end
+        function x = fix(x),   x = nativeUniFun(x, @fix); end
         function x = floor(x), x = nativeUniFun(x, @floor); end
-        function x = mod(x,y), x = nativeBiFun(x,y,@mod); end
-        function x = rem(x,y), x = nativeBiFun(x,y,@rem); end
         function x = round(x, varargin), x = nativeUniFun(x, @round, varargin{:}); end
         function x = eps(x),   x = nativeUniFun(x, @eps); end
+        function x = mod(x,y), x = nativeBiFun(x,y,@mod); end
+        function x = rem(x,y), x = nativeBiFun(x,y,@rem); end
 
         % linear algebra
         function x = chol(x,varargin), x = nativeUniFun(x, @chol, varargin{:}); end
-        function x = ldivide(x,y), x = nativeBiFun(x,y, @ldivide); end
         function x = lu(x, varargin), x = nativeUniFun(x, @lu, varargin{:}); end
+        function x = transpose(x), x = gpuUniFun(x, @transpose); end
+        function x = ctranspose(x), x = conj(transpose(x)); end
+        function x = ldivide(x,y), x = nativeBiFun(x,y, @ldivide); end
         function x = mtimes(x,y), x = nativeBiFun(x,y,@mtimes); end
         function x = mldivide(x,y), x = nativeBiFun(x,y,@mldivide); end
         function x = mrdivide(x,y), x = nativeBiFun(x,y,@mrdivide); end
         function x = rdivide(x,y), x = nativeBiFun(x,y,@rdivide); end
-        function x = ctranspose(x), x = nativeUniFun(x, @ctranspose); end
-        function x = transpose(x), x = gpuUniFun(x, @transpose); end
 
         % logic
         function x = all(x, varargin), x = logical(nativeUniFun(x, @all, varargin{:})); end
@@ -278,28 +338,28 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         % function x = area(x, varargin), x = nativeUniFun(x, @area, varargin{:}); end
 
         % reduction
-        function x = max(x, varargin), 
+        function [varargout] = max(x, varargin),
             if nargin >= 2 && ~isempty(varargin{1}) % second arg non-empty
-                x = nativeBiFun(x, varargin{1}, @max, varargin{2:end}); % this is max(X,Y,...) syntax
+                [varargout{1:nargout}] = nativeBiFun(x, varargin{1}, @max, varargin{2:end}); % this is max(X,Y,...) syntax
             else
-                x = nativeUniFun(x, @max, varargin{:}); % this is a reduction 
+                [varargout{1:nargout}] = nativeUniFun(x, @max, varargin{:}); % this is a reduction
             end
         end
-        function x = min(x, varargin),
+        function [varargout] = min(x, varargin),
             if nargin >= 2 && ~isempty(varargin{1}) % second arg non-empty
-                x = nativeBiFun(x, varargin{1}, @min, varargin{2:end}); % this is max(X,Y,...) syntax
+                [varargout{1:nargout}] = nativeBiFun(x, varargin{1}, @min, varargin{2:end}); % this is max(X,Y,...) syntax
             else
-                x = nativeUniFun(x, @min, varargin{:}); % this is a reduction
+                [varargout{1:nargout}] = nativeUniFun(x, @min, varargin{:}); % this is a reduction
             end
         end
         function x = mean(x, varargin), x = nativeUniFun(x, @mean, varargin{:}); end
         function x = sum(x, varargin), x = nativeUniFun(x, @sum, varargin{:}); end
         function x = prod(x, varargin), x = nativeUniFun(x, @prod, varargin{:}); end
-        
+
         % mapping
         function x = sort(x, varargin),  x = nativeUniFun(x, @sort, varargin{:}); end
         function x = cumsum(x,varargin), x = nativeUniFun(x, @cumsum,varargin{:}); end
-        
+
         % Misc.
         function n = colon(varargin),
             valfun = @(x) {getfield(gather(x), 'val')}; % from halfT to it's value
@@ -314,7 +374,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
             % return to gpu?
             if any(isgpu), n = gpuArray(n); end
         end
-        
+
         % DSP functions
         function x = conv(x,y,varargin), x = nativeBiFun(x,y,@conv,varargin{:}); end
         function x = conv2(x,y,varargin), x = nativeBiFun(x,y,@conv2,varargin{:}); end
@@ -324,25 +384,25 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = ifft(x, varargin), x = nativeUniFun(x, @ifft, varargin{:}); end
         function x = ifft2(x, varargin), x = nativeUniFun(x, @ifft2, varargin{:}); end
         function x = ifftn(x, varargin), x = nativeUniFun(x, @ifftn, varargin{:}); end
-        
+
         % data size checks
-        function x = iscolumn(x),   x = logical(gpuUniFun(x, @iscolumn)); end
-        function x = isempty(x),    x = logical(gpuUniFun(x, @isempty)); end
-        function x = ismatrix(x),   x = logical(gpuUniFun(x, @ismatrix)); end
-        function x = isrow(x),      x = logical(gpuUniFun(x, @isrow)); end
-        function x = isscalar(x),   x = logical(gpuUniFun(x, @isscalar)); end
-        function x = isvector(x),   x = logical(gpuUniFun(x, @isvector)); end
-        
+        function x = iscolumn(x),   x = gpuUniFun(x, @iscolumn  ).val; end
+        function x = isempty(x),    x = gpuUniFun(x, @isempty   ).val; end
+        function x = ismatrix(x),   x = gpuUniFun(x, @ismatrix  ).val; end
+        function x = isrow(x),      x = gpuUniFun(x, @isrow     ).val; end
+        function x = isscalar(x),   x = gpuUniFun(x, @isscalar  ).val; end
+        function x = isvector(x),   x = gpuUniFun(x, @isvector  ).val; end
+
         % data value checks
-        function x = isfinite(x),   x = logical(nativeUniFun(x, @isfinite)); end
-        function x = isinf(x),      x = logical(nativeUniFun(x, @isinf)); end
-        function x = isnan(x),      x = logical(nativeUniFun(x, @isnan)); end
-        function x = isreal(x),     x = logical(gpuUniFun(x, @isreal)); end
+        function x = isfinite(x),   x = logical(nativeUniFun(x, @isfinite   )); end
+        function x = isinf(x),      x = logical(nativeUniFun(x, @isinf      )); end
+        function x = isnan(x),      x = logical(nativeUniFun(x, @isnan      )); end
+        function x = isreal(x),     x = gpuUniFun(x, @isreal).val; end
         function x = issorted(x,varargin), x = logical(nativeUniFun(x, @issorted, varargin{:})); end
         % function x = isnumeric(x), x = logical(nativeUniFun(x, @isnumeric)); end
         % not sure what to do with this: it may mess up certain casting
         % rules
-        
+
         % array equivalency
         function x = isequal(x,y), x = logical(nativeBiFun(x,y, @isequal)); end
         function x = isequaln(x,y), x = logical(nativeBiFun(x,y, @isequaln)); end
@@ -363,6 +423,53 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         % function x = size(x, varargin), x = nativeUniFun(x, @size, varargin{:}); end
     end
 
+    % overloaded math
+    methods
+        function x = pagetranspose(x, varargin), x = gpuUniFun(x, @pagetranspose, varargin{:}); end
+    
+        function z = pagemtimes(x, y)
+            % [x, y] = deal(halfT(x), halfT(y)); % enforce halfT type
+
+            if x.gtype || y.gtype % send to GPU
+                [x, y] = deal(gpuArray(x), gpuArray(y));
+            else
+                error('halfT/pagemtimes unsupported on the CPU (performance).');
+            end
+            [x, y] = deal(x.val, y.val);
+            zc = ~(isreal(x) && isreal(y));
+            zi = alias(halfT(0));
+            zr = halfT(gpu_pagemtimes_helper(real(x), real(y)), 'aliased');
+            if zc
+                zr = zr - halfT(gpu_pagemtimes_helper(imag(x), imag(y)), 'aliased'); end
+            if ~isreal(y)
+                zi = halfT(gpu_pagemtimes_helper(real(x), imag(y)), 'aliased'); end
+            if ~isreal(x)
+                zi = zi + halfT(gpu_pagemtimes_helper(imag(x), real(y)), 'aliased'); end
+            if ~zc, z = zr; else, z = complex(zr, zi); end
+        end
+    end
+
+    % overload functions via promotion/demotion to/from single
+    methods
+        function vq = interp1(varargin)
+            ind_opts = find(cellfun(@(x) ischar(x) || isstring(x), varargin), 1, 'first'); % where the options start
+            if isempty(ind_opts), ind_opts = numel(varargin) + 1; end % starts after the end if not there
+            num_args = varargin(1 : ind_opts-1);
+            opt_args = varargin(ind_opts : end);
+            vq = halfT.promoteNFun(num_args, @interp1, [1], opt_args{:});
+        end
+
+        function vq = interp2(varargin)
+            ind_opts = find(cellfun(@(x) ischar(x) || isstring(x), varargin), 1, 'first'); % where the options start
+            if isempty(ind_opts), ind_opts = numel(varargin) + 1; end % starts after the end if not there
+            num_args = varargin(1 : ind_opts-1);
+            opt_args = varargin(ind_opts : end);
+            vq = halfT.promoteNFun(num_args, @interp2, [1], opt_args{:});
+        end
+
+        function x = vecnorm(x, varargin), x = promoteUniFun(x, @vecnorm, varargin{:}); end
+    end
+
     % redefines paren overloads
     methods
         function varargout = size(x, varargin), [varargout{1:nargout}] = size(x.val, varargin{:}); end
@@ -370,9 +477,9 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
             % check that all halfT values half the same aliasing.
             isaliased_ = any(cellfun(@(v)v.isaliased, varargin));
             if isaliased_, varargin = cellfun(@alias, varargin, 'UniformOutput', false); end % alias all of them to be sure
-            
+
             % concatenate, using implicit casting - should only effect gpu
-            % versus not gpu class. 
+            % versus not gpu class.
             val_ = cellfun(@(v){getfield(v,'val')}, varargin);
             out = halfT(cat(dim, val_{:}));
             out.isaliased = isaliased_;
@@ -392,34 +499,46 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
             end
         end
 
-        % tell MATLAB how to assign a value 
+        % tell MATLAB how to assign a value
         function x = parenAssign(x,indexOp,varargin)
             if isscalar(indexOp) % final indexing operation
                 assert(nargin==3); %  x(i) = y; -> (x, i, y)
                 y = varargin{1}; % other halfT or numeric data
 
-                % match aliasing if possible
-                if isa(y, 'halfT') % we can sync the types
-                    if x.isaliased && ~y.isaliased
-                        y = alias(y); % enforce aliased halfT
-                    elseif ~x.isaliased && y.isaliased
-                        y = dealias(y); % enforce aliased halfT
-                    end
-                    x.val.(indexOp) = y.val; return; % store
-                    
+                if isa(x, 'halfT') % we are assigning to a halfT
+                    % match aliasing if possible
+                    if isa(y, 'halfT') % we can sync the types
+                        if x.isaliased && ~y.isaliased
+                            y = alias(y); % enforce aliased halfT
+                        elseif ~x.isaliased && y.isaliased
+                            y = dealias(y); % enforce aliased halfT
+                        end
+                        x.val.(indexOp) = y.val; return; % store
 
-                elseif isnumeric(y) % we have a native numeric array
-                    if x.isaliased % aliased: we'll need to apply casting here
-                        yval = y;
-                        if isa(y, 'gpuArray'), yval = gather(yval); end
-                        yval = storedInteger(half(yval));
-                        x.val.(indexOp) = yval; return; % store
-                    else % not aliased: use MATLAB implicit casting rules
-                        x.val.(indexOp) = y; return; % store
+
+                    elseif isnumeric(y) % we have a native numeric array
+                        if x.isaliased % aliased: we'll need to apply casting here
+                            yval = y;
+                            if isa(y, 'gpuArray'), yval = gather(yval); end
+                            yval = storedInteger(half(yval));
+                            x.val.(indexOp) = yval; return; % store
+                        else % not aliased: use MATLAB implicit casting rules
+                            x.val.(indexOp) = y; return; % store
+                        end
+                    else % if not, go blind - user's fault if it's messed up
+                        warning("Unable to recognize input data of type " + class(y) + ".")
+                        x.val.(indexOp) = y; return;
                     end
-                else % if not, go blind - user's fault if it's messed up
-                    warning("Unable to recognize input data of type " + class(y) + ".")
-                    x.val.(indexOp) = y; return; 
+                else % we are assigning from a halfT, but not to a halfT
+                    if isempty(x), % if empty, initialize as a halfT type like y
+                        x.(indexOp) = getfield(dealias(y),'val'); % assign the values
+                        x = halfT(x); % cast to the same type as y
+                        if y.gtype, x = gpuArray(x);
+                        elseif y.isaliased, x = alias(x);
+                        end
+                    else
+                        x.(indexOp) = getfield(dealias(y),'val'); % otherwise, assign just the data (possibly recursive)
+                    end
                 end
             else
                 % Forward the other indexing operations
@@ -440,9 +559,9 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         % tell MATLAB how to delete an indexed subset of the object
         function x = parenDelete(x,indexOp), x.val.(indexOp) = []; end
 
-        
+
         %}
-        
+
         %{
 abs         barh        end         ifft2       isnumeric   lu          plot3       scatter     transpose   
 acos        ceil        eq          ifftn       isreal      max         plotmatrix  scatter3    uint16      
