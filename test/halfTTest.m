@@ -7,7 +7,7 @@ classdef halfTTest < matlab.unittest.TestCase
     properties(ClassSetupParameter)
     end
 
-    methods(TestClassSetup, ParameterCombination = 'exhaustive')
+    methods(TestClassSetup)
         % Shared setup for the entire test class
         function setup(test), addpath(halfTTest.base_dir()); end
     end
@@ -25,21 +25,28 @@ classdef halfTTest < matlab.unittest.TestCase
             'anymissing','anynan','area','asin','asinh','atan','atan2',...
             'atanh','cast','ceil','chol','circshift','colon','complex',...
             'conj','conv','conv2','cos','cosh','cospi','ctranspose',...
-            'cumsum','dealias','double','eq','exp','expm1','fft','fft2',...
+            'cumsum','dealias','double','eps','eq','exp','expm1','fft','fft2',...
             'fftn','fix','flip','floor','gather','ge','gpuArray','gt',...
-            'half','halfT','ifft','ifft2','ifftn','imag','int16','int32',...
+            'half','halfT','hypot','ifft','ifft2','ifftn','imag','int16','int32',...
             'int64','int8','iscolumn','isempty','isequal','isequaln',...
             'isfinite','isinf','ismatrix','isnan','isreal','isrow',...
             'isscalar','issorted','isvector','ldivide','le','log','log10',...
             'log1p','log2','logical','lt','lu','max','mean','min','minus',...
-            'mldivide','mod','mrdivide','mtimes','ne','not','or','permute',...
-            'plus','pow10','pow2','power','prod','rdivide','real','rem',...
-            'repelem','repmat','reshape','round','rsqrt','sign','sin',...
+            'mldivide','mod','mrdivide','mtimes','ne','not','or',...
+            'pagemtimes', 'pagetranspose', ... 
+            'permute','plus','pow10','pow2','power','prod','rdivide','real',...
+            'rem','repelem','repmat','reshape','round','rsqrt','sign','sin',...
             'single','sinh','sinpi','sort','sqrt','sum','tan','tanh',...
             'times','transpose','uint16','uint32','uint64','uint8',...
             'uminus','uplus', ...
             };
         dev = {'CPU', 'mixed'}
+    end
+    properties
+        x0_lo = half(2*(rand(10, 'like', complex(double(0)))-0.5));
+        x0_hi = realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
+        x0_mid = sqrt(realmax('half'))*(rand(10, 'like', complex(double(0)))-0.5);
+        y0_mid = sqrt(realmax('half'))*(rand(10, 'like', complex(double(0)))-0.5);
     end
     methods(Test, ParameterCombination = 'exhaustive')
         function halfMathUniComp(test, fun, dev)
@@ -49,7 +56,7 @@ classdef halfTTest < matlab.unittest.TestCase
             % set of functions
             funs = {...
                 'abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', ...
-                'conj', 'cos', 'cosh', 'cospi', 'exp', 'expm1', 'log', ...
+                'conj', 'cos', 'cosh', 'cospi', 'eps', 'exp', 'expm1', 'log', ...
                 'log10', 'log1p', 'log2', 'pow10', 'pow2', 'sign', ...
                 'sin', 'sinh', 'sinpi', 'sqrt', 'tan', 'tanh', ...
                 'uminus', 'uplus', 'imag', 'real', ...
@@ -57,7 +64,7 @@ classdef halfTTest < matlab.unittest.TestCase
                 };
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
+            x0 = test.x0_hi; % realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
 
             % gpu casting tests
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
@@ -81,7 +88,7 @@ classdef halfTTest < matlab.unittest.TestCase
                 };
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = realmax('half')*(rand(10, 'like', real(double(0)))-0.5);
+            x0 = real(test.x0_hi); % realmax('half')*(rand(10, 'like', real(double(0)))-0.5);
 
             % gpu casting tests
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
@@ -99,16 +106,17 @@ classdef halfTTest < matlab.unittest.TestCase
             % functions match their half type analog
 
             % set of functions
-            funs = {'minus','plus','power','times','conv','conv2','mod','rem','pow2','complex'};
+            funs = {'minus','plus','power','times','hypot','conv','conv2',...
+                'mod','rem','pow2','complex'};
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = sqrt(realmax('half'))*(rand(10, 'like', complex(double(0)))-0.5);
-            y0 = sqrt(realmax('half'))*(rand(10, 'like', complex(double(0)))-0.5);
+            x0 = test.x0_mid; % sqrt(realmax('half'))*(rand(10, 'like', complex(double(0)))-0.5);
+            y0 = test.y0_mid; % sqrt(realmax('half'))*(rand(10, 'like', complex(double(0)))-0.5);
 
             switch fun
                 case "conv", [x0, y0] = deal(x0(:), y0(:));  % conv requires vectors
                 case {'complex','mod','rem'}, [x0, y0] = deal(real(x0), real(y0)); % complex/modulus/remainder for real values only
-                case {'pow2'}, y0 = half(randi([-10,10],size(y0))); % these work with integers exponent
+                case {'pow2'}, [x0, y0] = deal(real(x0), half(randi([-10,10],size(y0)))); % these work with integers exponent
             end
 
             % gpu casting types
@@ -132,8 +140,8 @@ classdef halfTTest < matlab.unittest.TestCase
             funs = {'eq','ge','gt','le','lt','ne','or'};
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = sqrt(realmax('half'))*(rand(10      , 'like', complex(double(0)))-0.5);
-            y0 = sqrt(realmax('half'))*(rand(size(x0), 'like', complex(double(0)))-0.5);
+            x0 = test.x0_mid; % sqrt(realmax('half'))*(rand(10      , 'like', complex(double(0)))-0.5);
+            y0 = test.y0_mid; % sqrt(realmax('half'))*(rand(size(x0), 'like', complex(double(0)))-0.5);
             i = 0<randi([0,1], size(x0));
             y0(i) = x0(i);
 
@@ -172,31 +180,33 @@ classdef halfTTest < matlab.unittest.TestCase
 
             % set of functions
             funs = {...
-                'ldivide', 'rdivide', 'mtimes', 'mldivide', 'mrdivide', ...
-                 'lu','chol', 'ctranspose', 'transpose' ...
+                'ldivide', 'rdivide', 'mtimes', ...
+                'mldivide', 'mrdivide', ...
+                 'lu','chol',  'ctranspose', 'transpose' ...
                 };
             if ~ismember(fun, funs), return; end % short-circuit
 
             A = sqrt(realmax('half')/10)*(rand(10, 'like', complex(double(0)))-0.5);
-            b = sqrt(realmax('half')/10)*(rand([10, 1], 'like', complex(double(0)))-0.5);
+            x = sqrt(realmax('half')/10)*(rand([10, 1], 'like', complex(double(0)))-0.5);
             
             % gpu casting
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
 
             % special rules
             switch fun, 
-                case "chol", A = A'*A; % requires positive definite
-                case 'mrdivide', b = b(1); % requires scalar divisor
-                case 'mldivide', A = A(1);  % requires scalar divisor
+                case "chol", A = A'*A + A*A'; % requires positive definite
+                case 'mrdivide', x = x(1); % requires scalar divisor
+                case 'mldivide', A = A(1); % requires scalar divisor
             end
 
             % import matlab.unittest.constraints.IsEqualTo;
             % test.assertThat(x.val , IsEqualTo('Transducer'));
             switch fun
-                case {'ldivide', 'rdivide', 'mtimes', 'mldivide', 'mrdivide'}
+                case {'ldivide', 'rdivide', 'mtimes', ...
+                        'mldivide', 'mrdivide'}
                     f = str2func(fun);
-                    z0 = f(A, b);
-                    z  = f(hT(A), hT(b));
+                    z0 = f(A, x);
+                    z  = f(hT(A), hT(x));
                     test.assertEqual(getfield(gather(z),'val'), z0);
                 case {'ctranspose', 'transpose', 'lu', 'chol'}
                     f = str2func(fun);
@@ -205,6 +215,53 @@ classdef halfTTest < matlab.unittest.TestCase
                     test.assertEqual(getfield(gather(z),'val'), z0);
             end
         end
+
+        function halfPagefun(test, fun, dev)
+            % HALFPAGEFUN - Test that the halfT linear algebra math
+            % page functions match their half type analog
+
+            % set of functions
+            funs = {...
+                'pagemtimes', 'pagetranspose'...
+                };
+            if ~ismember(fun, funs), return; end % short-circuit
+
+            % TODO: make this multi-dimensional to test the higher
+            % dimensional functionality i.e. A/x should be at least 5 D
+            % with some dimensions singular, some broadcasting
+            A = sqrt(realmax('half')/10)*(rand(10, 'like', complex(double(0)))-0.5);
+            x = sqrt(realmax('half')/10)*(rand([10, 1], 'like', complex(double(0)))-0.5);
+            % expand
+            A = A .* rand([1,1,1,3,4,1]);
+            x = x .* rand([1,1,1,3,1,5]);
+
+            % gpu casting
+            switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
+
+            import matlab.unittest.constraints.IsEqualTo;
+            import matlab.unittest.constraints.RelativeTolerance;
+            % test.assertThat(x.val , IsEqualTo('Transducer'));
+
+            f = str2func(fun);
+            switch fun
+                case {'pagemtimes'} % threshold because of BLAS implementation
+                    pfun = str2func(fun(5:end)); % remove 'page'
+                    for i = 1:3, for j = 1:4, for k = 1:5,
+                        z0(:,:,:,i,j,k) = pfun(A(:,:,:,i,j,:),x(:,:,:,i,:,k));
+                    end,         end,         end
+                    z  = f(hT(A), hT(x));
+                    test.assertThat(double(gather(z)) , IsEqualTo(double(z0), 'Within', RelativeTolerance(1.2e-3)));
+
+                    z0 = pfun(A(:,:,1), x(:,:,1));
+                    z = f(hT(A(:,:,1)), hT(x(:,:,1)));
+                    test.assertThat(double(gather(z)) , IsEqualTo(double(z0), 'Within', RelativeTolerance(1.2e-3)));
+                case {'pagetranspose'}
+                    z0 = f(A);
+                    z  = f(hT(A));
+                    test.assertEqual(gather(z).val, z0);
+            end
+        end
+
         function halfArrAttr(test, fun, dev)
             % HALFATTR - Test that all halfT attributes match their half 
             % type analog
@@ -221,7 +278,7 @@ classdef halfTTest < matlab.unittest.TestCase
             % set of attributes
             [sz{1}, sz{2}, sz{3}] = ndgrid([0 1 10], [0 1 10], [0 1 10]);
             sz = cell2mat(cellfun(@(s){s(:)'}, sz(:))); % 3 x S sizes
-            x0 = realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
+            x0 = test.x0_hi; % realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
             f = str2func(fun); % function 
             switch fun
                 case "isreal"
@@ -317,7 +374,7 @@ classdef halfTTest < matlab.unittest.TestCase
             funs = {'max', 'min', 'mean', 'sum', 'prod', 'any', 'all'};
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = half(2*(rand(10, 'like', complex(double(0)))-0.5));
+            x0 = test.x0_lo; % half(2*(rand(10, 'like', complex(double(0)))-0.5));
             
             % gpu casting tests
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
@@ -352,24 +409,18 @@ classdef halfTTest < matlab.unittest.TestCase
             funs = {'allfinite', 'anymissing', 'anynan'};
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = half(2*(rand(10, 'like', complex(double(0)))-0.5));
+            x0 = test.x0_lo; % half(2*(rand(10, 'like', complex(double(0)))-0.5));
             
             % gpu casting tests
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
             x = hT(x0);
 
-            % operate in dimension 2
-            switch fun
-                case {'max', 'min'}, opts = {[], 2};
-                case {'mean', 'sum', 'prod'}, opts = {2};
-            end
-
             % import matlab.unittest.constraints.IsEqualTo;
             % test.assertThat(x.val , IsEqualTo('Transducer'));
             f = str2func(fun);
-            z0 = f(x0, opts{:});
-            z  = f(x , opts{:});
-            test.assertEqual(getfield(gather(z),'val'), z0);
+            z0 = f(x0);
+            z  = f(x );
+            test.assertEqual(gather(z), z0);
             
         end
         
@@ -381,7 +432,7 @@ classdef halfTTest < matlab.unittest.TestCase
             funs = {'fft', 'fft2', 'fftn', 'ifft', 'ifft2', 'ifftn', 'cumsum', 'sort'};
             if ~ismember(fun, funs), return; end % short-circuit
 
-            x0 = half(2*(rand(10, 'like', complex(double(0)))-0.5));
+            x0 = test.x0_lo; % half(2*(rand(10, 'like', complex(double(0)))-0.5));
             
             % gpu casting tests
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
@@ -417,7 +468,7 @@ classdef halfTTest < matlab.unittest.TestCase
 
             % half type casting
             switch dev, case "mixed", hT = @(x)gpuArray(halfT(x)); otherwise, hT = @halfT; end
-            x0 = realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
+            x0 = test.x0_hi; % realmax('half')*(rand(10, 'like', complex(double(0)))-0.5);
             x = hT(x0);
 
             % gpu casting tests
