@@ -426,15 +426,15 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = pagetranspose(x, varargin), x = gpuUniFun(x, @pagetranspose, varargin{:}); end
     
         function z = pagemtimes(x, y)
-            % [x, y] = deal(halfT(x), halfT(y)); % enforce halfT type
+            [x, y] = deal(halfT(x), halfT(y)); % enforce halfT type
 
-            if x.gtype || y.gtype % send to GPU
+            if x.gtype || y.gtype % operate on GPU via CUBLAS
                 [x, y] = deal(gpuArray(x), gpuArray(y));
                 [x, y] = deal(x.val, y.val);
                 zc = ~(isreal(x) && isreal(y));
                 zi = alias(halfT(0));
                 zr = halfT(gpu_pagemtimes_helper(real(x), real(y)), 'aliased');
-                if zc
+                if ~isreal(y) && ~isreal(x)
                     zr = zr - halfT(gpu_pagemtimes_helper(imag(x), imag(y)), 'aliased'); end
                 if ~isreal(y)
                     zi = halfT(gpu_pagemtimes_helper(real(x), imag(y)), 'aliased'); end
@@ -464,8 +464,8 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                 if isa(gcp('nocreate'), 'parallel.ThreadPool')
                     clu = gcp(); else, clu = 0; % only use a thread pool
                 end
-                parfor(k = 1:K, clu)
-                    z(:,:,k) = mtimes(x(:,:,ix{k}), y(:,:,iy{k}));
+                parfor(l = 1:K, clu)
+                    z(:,:,l) = mtimes(x(:,:,ix{l}), y(:,:,iy{l}));
                 end
             end
         end
