@@ -32,7 +32,6 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                 x
                 aliasing (1,1) string {mustBeMember(aliasing, ["aliased", "native"])} = "native"
             end
-            if nargin < 2, aliasing = "native"; end
             if isa(x, 'halfT'),
                 y = x;
             else
@@ -121,7 +120,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                     z = cast(getfield(dealias(y),'val'), 'like', x);
                 elseif isa(x, 'halfT')% casting from native to a halfT
                     z = halfT(y); % enforce y a halfT
-                    if isa(x, 'gpuArray'), z = gpuArray(z); end
+                    if x.gtype, z = gpuArray(z); end
                     if x.isaliased, z = alias(z); end
                 end
             end
@@ -442,7 +441,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                     zi = zi + halfT(gpu_pagemtimes_helper(imag(x), real(y)), 'aliased'); end
                 if ~zc, z = zr; else, z = complex(zr, zi); end
             else
-                % implement via mtimes
+                % implement on CPU via mtimes
                 D = max(4,max(ndims(x), ndims(y))); % need upper dim size to have at least 2 dimensions ...
                 xsz = size(x,1:D);
                 ysz = size(y,1:D);
@@ -460,13 +459,18 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                 end
 
                 % compute
-                z = halfT(zeros(zsz)); % init
+                zv = half(zeros(zsz)); % init
                 if isa(gcp('nocreate'), 'parallel.ThreadPool')
                     clu = gcp(); else, clu = 0; % only use a thread pool
                 end
+                xv = dealias(x).val; yv = dealias(y).val;
                 parfor(l = 1:K, clu)
-                    z(:,:,l) = mtimes(x(:,:,ix{l}), y(:,:,iy{l}));
+                    zv(:,:,l) = mtimes(xv(:,:,ix{l}), yv(:,:,iy{l}));
                 end
+                
+                % save as halfT - match aliasing of lhs
+                z = halfT(zv);
+                if x.isaliased, z = alias(z); end
             end
         end
     end
