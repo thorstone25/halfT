@@ -87,12 +87,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
     d_A = (const half *)(mxGPUGetDataReadOnly(A));
     d_B = (const half *)(mxGPUGetDataReadOnly(B));
     
-    /* 
-     * Inputs 3 and 4 are the strides for A and B: we trust this blindly for now
-     * Input 5 is the number of dimensions.
-    */
     
-
     // get the output matrix size
     const mwSize nDimsC = max(nDimsA, nDimsB); // number of output dimensions
     mwSize * dimsC = (mwSize *)mxMalloc(nDimsC * sizeof(nDimsC)); // array for each dimension size
@@ -107,7 +102,7 @@ void mexFunction(int nlhs, mxArray *plhs[],
                             mxGPUGetClassID(A),
                             mxGPUGetComplexity(A),
                             MX_GPU_DO_NOT_INITIALIZE);
-    const size_t Csz = (size_t) mxGPUGetNumberOfElements(C);
+    const size_t Csz = (size_t) mxGPUGetNumberOfElements(C); // total size of the data
     d_C = (half *)(mxGPUGetData(C)); // point to device data
     
     // make sure that the number of output strides matches the size of the data that we computed
@@ -141,38 +136,54 @@ void mexFunction(int nlhs, mxArray *plhs[],
     }
 
     /* code to call CUBLAS */
-    cudaError_t cudaErr;
-    cublasStatus_t stat;
-    cublasHandle_t handle;
+    cudaError_t cudaErr; // error
+    cublasStatus_t stat; // status
+    cublasHandle_t handle; // handle
     cublasOperation_t trans = CUBLAS_OP_N; // ONE OF CUBLAS_OP_{N,T,C} for none/trans/ctrans
-    streamArray = (cudaStream_t *) mxMalloc(L * sizeof(cudaStream_t *));
+    streamArray = (cudaStream_t *) mxMalloc(L * sizeof(cudaStream_t *)); // new stream for each call - we assume this is less than the max
     stat = cublasCreate(&handle);
     
-    for (int i = 0; i < L; ++i){
-        cudaErr = cudaStreamCreate(&streamArray[i]);
+    // create a set of new streams
+    int i_stream;
+    for (i_stream = 0; i_stream < L; ++i_stream){
+        cudaErr = cudaStreamCreateWithFlags(&streamArray[i_stream], cudaStreamNonBlocking);
         if(cudaErr != cudaSuccess)
             break;
     }
+
+    // launch a matrix multiply on each stream
     for(int i = 0; i < L; ++i) // for each output index
-        if (stat == CUBLAS_STATUS_SUCCESS) { // we succeeded in the last call: 
-            cublasSetStream(handle, streamArray[i]); // move to the next stream
+        if (stat == CUBLAS_STATUS_SUCCESS && cudaErr == cudaSuccess) { // we succeeded in the last call: 
+            // cublasSetStream(handle, streamArray[i]); // move to the next stream
             stat = cublasHgemm(handle, trans, trans, M,N,K, &alpha, // call gemm for dense matrix x matrix multiply
                            d_Aarr[i], M, d_Barr[i], K, &beta, d_C + i*M*N, M);
-    }
+        }
 
     /* Wrap the result up as a MATLAB gpuArray for return. */
     plhs[0] = mxGPUCreateMxArrayOnGPU(C);
 
+    /* -------------- CLEANUP ------------ */
+    // cleanup CUBLAS (only as many streams as were created!)
+    for (int i = 0; i < i_stream; ++i){
+        cudaErr = cudaStreamDestroy(streamArray[i]);
+    }
+    mxFree(streamArray);
+    cublasDestroy(handle); 
+    
+    // Free temporary array allocations
+    mxFree(d_Aarr);
+    mxFree(d_Barr);
+    mxFree(dimsC);
+    
     /*
      * The mxGPUArray pointers are host-side structures that refer to device
      * data. These must be destroyed before leaving the MEX function.
      */
-    cublasDestroy(handle); // cleanup
     mxGPUDestroyGPUArray(A); // cleanup
     mxGPUDestroyGPUArray(B); // cleanup
     mxGPUDestroyGPUArray(C); // cleanup
 
     if(stat != CUBLAS_STATUS_SUCCESS){
-        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:failure", "Failed to call the CUDA kernels");
+        mexErrMsgIdAndTxt("parallel:gpu:pagemtimes:failure", "Failed to call the CUDA kernels.");
     }
 }
