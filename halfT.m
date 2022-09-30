@@ -82,19 +82,20 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function y = gpuArray(y), y = alias(y); y.val = gpuArray(y.val); end
         % GPUARRAY - Send data to the GPU
         %
-        % y = GPUARRAY(y) returns a halfT object whos underlying data
-        % resides on the GPU. If the data is not already aliased, it will
-        % be aliased prior to sending it to the GPU.
+        % y = GPUARRAY(y) sends a halfT object whos underlying data
+        % resides on the CPU to the GPU. If the data is not already
+        % aliased, it will be aliased prior to sending it to the GPU.
         %
         % See also HALFT/ALIAS HALFT/GATHER
         function y = gather(y), y.val = gather(y.val); y = dealias(y); end
-        % GPUARRAY - Return data to the CPU
+        % GATHER - Return data to the CPU
         %
-        % y = GPUARRAY(y) returns a halfT object whos underlying data
-        % resides on the CPU. If the data is not already de-aliased, it
-        % will be de-aliased after return it to the CPU.
+        % y = GATHER(y) returns a halfT object whos underlying data
+        % resides on the GPU to the CPU. If the data is not already
+        % de-aliased, it will be de-aliased after return it to the CPU.
         %
         % See also HALFT/ALIAS HALFT/GPUARRAY
+        function tf = isnumeric(y), tf = true; end %#ok<MANU>
     end
 
     % generic type converter
@@ -354,7 +355,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = prod(x, varargin), x = nativeUniFun(x, @prod, varargin{:}); end
 
         % mapping
-        function x = sort(x, varargin),  x = nativeUniFun(x, @sort, varargin{:}); end
+        function [x, i] = sort(x, varargin),  [x, i] = nativeUniFun(x, @sort, varargin{:}); end
         function x = cumsum(x,varargin), x = nativeUniFun(x, @cumsum,varargin{:}); end
 
         % Misc.
@@ -418,6 +419,33 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         % function x = ndims(x), x = gpuUniFun(x, @ndims); end
         % function x = numel(x), x = gpuUniFun(x, @numel); end
         % function x = size(x, varargin), x = nativeUniFun(x, @size, varargin{:}); end
+        
+        % constant initialization
+        function x = zeros(varargin)
+            i = find(cellfun(@(v) (isstring(v) || ischar(v)) && v == "like", varargin)); % is this 'like' syntax
+            if ~isempty(i), 
+                % TODO: create the array without the temporary values
+                proto = varargin{i+1};
+                x = cast(zeros(varargin{1:i-1}), 'like', proto);
+            elseif all(cellfun(@isnumeric, varargin))
+                x = zeros(double([varargin{:}])); % no type requested - no need for halfT
+            else 
+                error('Unknown request for zeros')
+            end
+        end
+
+        function x = ones(varargin)
+            i = find(cellfun(@(v) (isstring(v) || ischar(v)) && v == "like", varargin)); % is this 'like' syntax
+            if ~isempty(i), 
+                % TODO: create the array without the temporary values
+                proto = varargin{i+1};
+                x = cast(ones(varargin{1:i-1}), 'like', proto);
+            elseif all(cellfun(@isnumeric, varargin))
+                x = ones(double([varargin{:}])); % no type requested - no need for halfT
+            else 
+                error('Unknown request for zeros')
+            end
+        end
     end
 
     % overloaded math
@@ -441,33 +469,76 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                     zi = zi + halfT(gpu_pagemtimes_helper(imag(x), real(y)), 'aliased'); end
                 if ~zc, z = zr; else, z = complex(zr, zi); end
             else
-                % implement on CPU via mtimes
-                D = max(4,max(ndims(x), ndims(y))); % need upper dim size to have at least 2 dimensions ...
-                xsz = size(x,1:D);
-                ysz = size(y,1:D);
-                zsz = [size(x,1), size(y,2), max(xsz(3:D), ysz(3:D))];
-                K = prod(zsz(3:end)); % number of upper dimensions
+                % get data
+                xv = dealias(x).val; 
+                yv = dealias(y).val;
+                D = max(ndims(x), ndims(y)); % maximum dimension of the data
 
-                % find the indices
-                indz = cell(1,D-2);
-                for k = K:-1:1
-                    [indz{:}] = ind2sub(zsz(3:end), k);
-                    indx = num2cell(arrayfun(@min,[indz{:}], xsz(3:end)));
-                    indy = num2cell(arrayfun(@min,[indz{:}], ysz(3:end)));
-                    ix{k} = sub2ind(xsz(3:end), indx{:});
-                    iy{k} = sub2ind(ysz(3:end), indy{:});
-                end
+                % dispatch based on problem structure
+                if ismatrix(xv)
+                    % we have (M x N) x (N x P |x Q x R ...)
+                    % we can compute (M x N) x (N x [Q x R ...]) for each P 
+                    % and then reshape the output to (M x P x Q x R ...)
+                    zszp = [size(x,1), 1, max(size(x,3:D), size(y,3:D))]; % one P at a time
+                    M = size(yv,1);
+                    parfor (p = 1:size(yv,2),0)
+                        zv{p} = reshape(xv * reshape(yv(:,p,:),M,[]), zszp);
+                    end
+                    zv = cat(2, zv{:});
+                elseif ismatrix(yv) % transpose of above
+                    % we have (P x N |x Q x R ...) x (N x M)
+                    % we can compute ((M x N) x (N X [Q x R ...]))^T for each P 
+                    % and then reshape the output to (P x M |x Q x R x ...)
+                    zszp = [1, size(y,2), max(size(x,3:D), size(y,3:D))]; % one P at a time
+                    M = size(xv,2); 
+                    parfor (p = 1:size(xv,1),0)
+                        zv{p} = reshape((yv.' * reshape(xv(p,:),M,[])).', zszp);
+                    end
+                    zv = cat(1, zv{:});
 
-                % compute
-                zv = half(zeros(zsz)); % init
-                if isa(gcp('nocreate'), 'parallel.ThreadPool')
-                    clu = gcp(); else, clu = 0; % only use a thread pool
-                end
-                xv = dealias(x).val; yv = dealias(y).val;
-                parfor(l = 1:K, clu)
-                    zv(:,:,l) = mtimes(xv(:,:,ix{l}), yv(:,:,iy{l}));
-                end
+                elseif size(xv,2) == 1 && size(yv,1) == 1
+                    % we have (M x 1 |x [1|Q] x [1|R] x ...) x (1 x P |x [1|Q] x [1|R] x ...)
+                    % we can identify this with the hadamard product
+                    zv = xv .* yv;
+
+                elseif size(xv,1) == 1 && size(yv,2) == 1 && all(...
+                           size(xv,3:max(3,D))...      
+                        == size(yv,3:max(3,D))...
+                        )
+                    % we have (1 x N |x Q x R x ...) x (N x 1 |x Q x R x ...)
+                    % we can identify this with the dot product (no
+                    % broadcasting allowed here)
+                    zv = dot(pagetranspose(xv), yv, 1);
                 
+                else % difficult to simplify - brute force it
+                    % select compute cluster if applicable
+                    if isa(gcp('nocreate'), 'parallel.ThreadPool')
+                        clu = gcp(); else, clu = 0; % only use a thread pool
+                    end
+
+                    % implement on CPU via mtimes
+                    D = max(4,D); % need upper dim size to have at least 2 dimensions ...
+                    xsz = size(x,1:D);
+                    ysz = size(y,1:D);
+                    zsz = [size(x,1), size(y,2), max(xsz(3:D), ysz(3:D))];
+                    K = prod(zsz(3:end)); % number of upper dimensions
+
+                    % find the indices
+                    indz = cell(1,D-2);
+                    for k = K:-1:1
+                        [indz{:}] = ind2sub(zsz(3:end), k);
+                        indx = num2cell(arrayfun(@min,[indz{:}], xsz(3:end)));
+                        indy = num2cell(arrayfun(@min,[indz{:}], ysz(3:end)));
+                        ix{k} = sub2ind(xsz(3:end), indx{:});
+                        iy{k} = sub2ind(ysz(3:end), indy{:});
+                    end
+
+                    zv = half(zeros(zsz)); % init
+                    parfor(l = 1:K, clu)
+                        zv(:,:,l) = mtimes(xv(:,:,ix{l}), yv(:,:,iy{l}));
+                    end
+                end
+
                 % save as halfT - match aliasing of lhs
                 z = halfT(zv);
                 if x.isaliased, z = alias(z); end
@@ -500,6 +571,8 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
     methods
         function varargout = size(x, varargin), [varargout{1:nargout}] = size(x.val, varargin{:}); end
         function out = cat(dim, varargin)
+            % force all to halfT type
+            varargin = cellfun(@halfT, varargin, 'UniformOutput',false);
             % check that all halfT values half the same aliasing.
             isaliased_ = any(cellfun(@(v)v.isaliased, varargin));
             if isaliased_, varargin = cellfun(@alias, varargin, 'UniformOutput', false); end % alias all of them to be sure
