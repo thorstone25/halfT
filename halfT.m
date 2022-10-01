@@ -685,6 +685,70 @@ bar         double      ifft        isnan       lt          plot        rsqrt   
     methods
         function tf = get.gtype(y), tf = isgpu(y.val); end
     end
+
+    methods(Static)
+        function build_mex(cuda_path)
+            % BUILD_MEX - Build the mex files
+            %
+            % HALFT.BUILD_MEX() builds the mex files. There must be a
+            % working CUDA installation.
+            %
+            % HALFT.BUILD_MEX(CUDA_PATH) uses the CUDA installation at
+            % CUDA_PATH. The default is '/usr/local/cuda'.
+
+            % TODO: use the 
+            arguments
+                cuda_path {mustBeFolder} = find_cuda() % default on linux
+            end
+            [base_folder] = fileparts(mfilename('fullpath')); % reference to this file's location
+            ifile = fullfile(base_folder, 'src', 'mypagemtimes.cu'); % input filename
+            ofile = fullfile(base_folder, 'private', 'gpu_pagemtimes_helper.cu'); % output filename
+            mexcuda(ifile, "-I" + fullfile(cuda_path, 'include'), '-lcublas', '-output', ofile);
+        end
+    end
+
+end
+
+function p = find_cuda()
+if isunix
+    p = getenv('CUDA_PATH'); % use env. var if set
+    if isfolder(p) % false if empty
+    else
+        % p = "/usr/local/cuda"; % linux default cuda path
+        % TODO: search via system call: 
+        % grab 
+        % 'find /usr/local/ -name cublas_v2.h'
+        p = fullfile(matlabroot, 'sys', 'cuda/glnxa64/cuda/');
+    end
+    if ~exist(fullfile(p, 'bin', 'nvcc'), 'file'), warning("nvcc not found at " + p); end
+
+elseif ispc
+    p = getenv('CUDA_PATH'); % use env. var if set
+    if isfolder(p) % false if empty
+    else
+        % get all the windows drives, from A to Z
+        isdrive = @(c) logical(exist([c ':\'], "dir"));
+        wdrvs = char(double('A'):double('Z'));
+        wdrvs = wdrvs(arrayfun(isdrive, wdrvs));
+
+        % search for nvcc
+        l = arrayfun(@(d) {dir(fullfile(d + ":\Program Files\NVIDIA GPU Computing Toolkit\CUDA","**","nvcc*"))}, wdrvs); % search for nvcc
+        l = cat(1, l{:});
+        if ~isempty(l) % we found at least one
+            p = fullfile(l(1).folder, '..');  % grab the 1st folder - TODO: grab the best instead
+        else % nothing found
+            p = string.empty; % empty string
+        end
+
+        % nvcc
+        if isempty(p), warning("nvcc not found.");
+        elseif ~exist(fullfile(p, 'bin', 'nvcc.exe')), warning("nvcc not found at " + p);
+        end
+    end
+else
+    p = string.empty;
+end
+
 end
 
 function tf = isgpu(x), tf = isa(x, 'gpuArray'); end
