@@ -331,6 +331,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
         function x = ne(x,y), x = logical(nativeBiFun(x,y, @ne)); end
         function x = not(x),  x = logical(nativeUniFun(x, @not)); end
         function x = or(x,y), x = logical(nativeBiFun(x,y, @or)); end
+        function n = nnz(x), n = sum(x ~= 0, 'all', 'double'); end
 
         % plotting
         % function x = area(x, varargin), x = nativeUniFun(x, @area, varargin{:}); end
