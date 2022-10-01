@@ -472,7 +472,7 @@ classdef halfT < matlab.mixin.indexing.RedefinesParen
                 % get data
                 xv = dealias(x).val; 
                 yv = dealias(y).val;
-                D = max(ndims(x), ndims(y)); % maximum dimension of the data
+                D = max([3, ndims(x), ndims(y)]); % maximum dimension of the data
 
                 % dispatch based on problem structure
                 if ismatrix(xv)
